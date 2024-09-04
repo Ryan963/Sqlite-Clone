@@ -79,49 +79,92 @@ def parse_varint(file):
         shift += 7  # Move to the next 7 bits
     return value
 
+def read_page_header(file, page_number):
+    """
+    Reads the header of a page and returns the number of cells and cell pointers.
+    """
+    page_offset = (page_number - 1) * 4096  # Assuming a page size of 4096 bytes
+    file.seek(page_offset)
+    page_header = file.read(8)
+    num_cells = int.from_bytes(page_header[3:5], byteorder='big')
+    cell_pointers = [int.from_bytes(file.read(2), byteorder='big') for _ in range(num_cells)]
+    return num_cells, cell_pointers
+
+def find_table_rootpage(file, table_name):
+    """
+    Finds the root page number for the specified table in the sqlite_schema.
+    """
+    database_file.seek(103)
+    number_of_tables = int.from_bytes(database_file.read(2), byteorder='big')
+    # skip the page header then the table header
+    database_file.seek(108)
+    cells_arr = [int.from_bytes(database_file.read(2), byteorder='big') for _ in range(number_of_tables)]
+    for cell_pointer in cells_arr:
+        file.seek(cell_pointer)
+        parse_varint(file)  # Read and ignore the size of the record
+        parse_varint(file)  # Read and ignore the rowid
+        record = parse_record(file)
+        if record[2].decode('utf-8') == table_name:  # Check if the tbl_name matches the table name
+            return record[3]  # Return the root page
+    raise ValueError(f"Table {table_name} not found in sqlite_schema")
+
+
+def count_rows_in_table(file, root_page_number):
+    """
+    Counts the number of rows in a table given the root page number.
+    """
+    num_cells, cell_pointers = read_page_header(file, root_page_number)
+    return num_cells
 
 
 database_file_path = sys.argv[1]
 command = sys.argv[2]
 
+with open(database_file_path, "rb") as database_file:
+    if command == ".dbinfo":
+            # You can use print statements as follows for debugging, they'll be visible when running tests.
+            print("Logs from your program will appear here!")
 
-if command == ".dbinfo":
-    with open(database_file_path, "rb") as database_file:
-        # You can use print statements as follows for debugging, they'll be visible when running tests.
-        print("Logs from your program will appear here!")
+            database_file.seek(16)  # Skip the first 16 bytes of the header
+            page_size = int.from_bytes(database_file.read(2), byteorder="big")
+            print(f"database page size: {page_size}")
+            database_file.seek(103)
+            number_of_tables = int.from_bytes(database_file.read(2), byteorder='big')
+            print(f"number of tables: {number_of_tables}")
+    elif command.startswith("SELECT COUNT(*) FROM"):
+                # Extract the table name from the command
+                table_name = command.split()[-1]
+                # Find the root page of the table
+                root_page = find_table_rootpage(database_file, table_name)
 
-        database_file.seek(16)  # Skip the first 16 bytes of the header
-        page_size = int.from_bytes(database_file.read(2), byteorder="big")
-        print(f"database page size: {page_size}")
-        database_file.seek(103)
-        number_of_tables = int.from_bytes(database_file.read(2), byteorder='big')
-        print(f"number of tables: {number_of_tables}")
-elif command == '.tables':
-     with open(database_file_path, "rb") as database_file:
-        database_file.seek(103)
-        number_of_tables = int.from_bytes(database_file.read(2), byteorder='big')
-        # skip the page header then the table header
-        database_file.seek(108)
-        cells_arr = [int.from_bytes(database_file.read(2), byteorder='big') for _ in range(number_of_tables)]
-        sqlite_schema_rows = []
-        for cell_pointer in cells_arr:
-            database_file.seek(cell_pointer)
-            record_size = parse_varint(database_file)
-            rowid = parse_varint(database_file)
-            record = parse_record(database_file)
-            # Table contains columns: type, name, tbl_name, rootpage, sql
-            sqlite_schema_rows.append(
-                {
-                    "type": record[0],
-                    "name": record[1],
-                    "tbl_name": record[2],
-                    "rootpage": record[3],
-                    "sql": record[4],
-                }
-            )
-        print(" ".join([n["name"].decode("utf-8") for n in sqlite_schema_rows]))
+                # Count the number of rows in the table
+                row_count = count_rows_in_table(database_file, root_page)
+                print(row_count)
+    elif command == '.tables':
+            database_file.seek(103)
+            number_of_tables = int.from_bytes(database_file.read(2), byteorder='big')
+            # skip the page header then the table header
+            database_file.seek(108)
+            cells_arr = [int.from_bytes(database_file.read(2), byteorder='big') for _ in range(number_of_tables)]
+            sqlite_schema_rows = []
+            for cell_pointer in cells_arr:
+                database_file.seek(cell_pointer)
+                record_size = parse_varint(database_file)
+                rowid = parse_varint(database_file)
+                record = parse_record(database_file)
+                # Table contains columns: type, name, tbl_name, rootpage, sql
+                sqlite_schema_rows.append(
+                    {
+                        "type": record[0],
+                        "name": record[1],
+                        "tbl_name": record[2],
+                        "rootpage": record[3],
+                        "sql": record[4],
+                    }
+                )
+            print(" ".join([n["name"].decode("utf-8") for n in sqlite_schema_rows]))
 
 
 
-else:
-    print(f"Invalid command: {command}")
+    else:
+        print(f"Invalid command: {command}")
