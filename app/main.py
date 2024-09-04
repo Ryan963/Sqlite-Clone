@@ -119,7 +119,7 @@ elif command == '.tables':
                     "sql": record[4],
                 }
             )
-            print(" ".join([n["name"].decode("utf-8") for n in sqlite_schema_rows]))
+        print(" ".join([n["name"].decode("utf-8") for n in sqlite_schema_rows]))
 
 
 
