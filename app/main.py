@@ -2,7 +2,63 @@ import sys
 
 from dataclasses import dataclass
 
-# import sqlparse - available if you need it!
+import sys
+
+def extract_column_and_table_name(command):
+    """
+    Extracts the column name and table name from the SELECT command.
+    Example: SELECT name FROM apples
+    """
+    parts = command.strip().split()
+    if len(parts) == 4 and parts[0].upper() == "SELECT" and parts[2].upper() == "FROM":
+        column_name = parts[1]
+        table_name = parts[3]
+        return column_name, table_name
+    raise ValueError("Invalid SQL command format")
+
+
+def find_table_metadata(file, table_name):
+    """
+    Finds the root page and CREATE TABLE statement for the specified table.
+    """
+    table_name = table_name.lower()  # Normalize for case-insensitive matching
+
+    # Go to the sqlite_schema table, typically on page 1 (offset 100 bytes)
+    file.seek(103)  # Offset where the number of cells is stored
+    number_of_tables = int.from_bytes(file.read(2), byteorder='big')
+
+    # Move to cell pointer array which starts after page header (assumed at byte 108)
+    file.seek(108)
+    cells_arr = [int.from_bytes(file.read(2), byteorder='big') for _ in range(number_of_tables)]
+
+    # Loop through each cell
+    for cell_pointer in cells_arr:
+        # Calculate the correct offset to start reading the cell
+        sqlite_schema_page_offset = 100
+        cell_start_offset = sqlite_schema_page_offset + cell_pointer
+        file.seek(cell_start_offset)
+        parse_varint(file)  # Read and ignore the size of the record
+        parse_varint(file)  # Read and ignore the rowid
+        record = parse_record(file)
+
+        if len(record) > 2:
+            tbl_name = record[2]
+            if isinstance(tbl_name, bytes):
+                tbl_name = tbl_name.decode('utf-8', errors='ignore').strip().lower()
+
+            # Compare the normalized table name
+            if tbl_name == table_name:
+
+                create_table_sql = record[4]
+                if isinstance(create_table_sql, bytes):
+                    create_table_sql = create_table_sql.decode('utf-8', errors='ignore')
+                return record[3], create_table_sql
+
+    raise ValueError(f"Table '{table_name}' not found in sqlite_schema")
+
+
+
+
 def parse_record(file):
     """
     Parses a record from the file and returns a list of column values.
@@ -108,6 +164,38 @@ def find_table_rootpage(file, table_name):
             return record[3]  # Return the root page
     raise ValueError(f"Table {table_name} not found in sqlite_schema")
 
+def find_column_index(create_table_sql, column_name):
+    """
+    Finds the index of the specified column in the CREATE TABLE statement.
+    """
+    parsed = sqlparse.parse(create_table_sql)[0]
+    columns_part = [token for token in parsed.tokens if token.ttype is None and '(' in str(token)][0]
+    column_defs = str(columns_part).split(',')
+    for index, column_def in enumerate(column_defs):
+        if column_name in column_def:
+            return index
+    raise ValueError(f"Column {column_name} not found in CREATE TABLE statement")
+
+def extract_column_values(file, root_page_number, column_index):
+    """
+    Extracts the values of the specified column from the table given its root page number.
+    """
+    num_cells, cell_pointers = read_page_header(file, root_page_number)
+    column_values = []
+
+    for cell_pointer in cell_pointers:
+        file.seek((root_page_number - 1) * 4096 + cell_pointer)
+        parse_varint(file)  # Record size
+        parse_varint(file)  # Rowid
+        record = parse_record(file)
+        
+        if column_index < len(record):
+            value = record[column_index]
+            if isinstance(value, bytes):  # Decode if it's bytes (TEXT)
+                value = value.decode('utf-8')
+            column_values.append(value)
+
+    return column_values
 
 def count_rows_in_table(file, root_page_number):
     """
@@ -131,15 +219,14 @@ with open(database_file_path, "rb") as database_file:
             database_file.seek(103)
             number_of_tables = int.from_bytes(database_file.read(2), byteorder='big')
             print(f"number of tables: {number_of_tables}")
-    elif command.startswith("SELECT COUNT(*) FROM"):
-                # Extract the table name from the command
-                table_name = command.split()[-1]
-                # Find the root page of the table
-                root_page = find_table_rootpage(database_file, table_name)
-
-                # Count the number of rows in the table
-                row_count = count_rows_in_table(database_file, root_page)
-                print(row_count)
+    elif command.startswith("SELECT"):
+        # Extract the column name and table name from the command
+        column_name, table_name = extract_column_and_table_name(command)
+        root_page, create_table_sql = find_table_metadata(database_file, table_name)
+        column_index = find_column_index(create_table_sql, column_name)
+        column_values = extract_column_values(database_file, root_page, column_index)
+        for value in column_values:
+            print(value)
     elif command == '.tables':
             database_file.seek(103)
             number_of_tables = int.from_bytes(database_file.read(2), byteorder='big')
@@ -163,8 +250,6 @@ with open(database_file_path, "rb") as database_file:
                     }
                 )
             print(" ".join([n["name"].decode("utf-8") for n in sqlite_schema_rows]))
-
-
 
     else:
         print(f"Invalid command: {command}")
