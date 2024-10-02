@@ -4,18 +4,6 @@ from dataclasses import dataclass
 
 import sys
 
-def extract_column_and_table_name(command):
-    """
-    Extracts the column name and table name from the SELECT command.
-    Example: SELECT name FROM apples
-    """
-    parts = command.strip().split()
-    if len(parts) == 4 and parts[0].upper() == "SELECT" and parts[2].upper() == "FROM":
-        column_name = parts[1]
-        table_name = parts[3]
-        return column_name, table_name
-    raise ValueError("Invalid SQL command format")
-
 
 def find_table_metadata(file, table_name):
     """
@@ -135,6 +123,36 @@ def parse_varint(file):
         shift += 7  # Move to the next 7 bits
     return value
 
+def extract_query_components(command):
+    """
+    Extracts the column name, table name, and WHERE clause (if any) from the SELECT command.
+    """
+    parts = command.strip().split()
+    if len(parts) < 4 or parts[0].upper() != "SELECT" or parts[2].upper() != "FROM":
+        raise ValueError("Invalid SQL command format")
+
+    column_name = parts[1]
+    table_name = parts[3]
+    where_clause = None
+
+    if "WHERE" in command.upper():
+        where_index = command.upper().index("WHERE")
+        where_clause = command[where_index + len("WHERE"):].strip()
+
+    return column_name, table_name, where_clause
+
+def parse_where_clause(where_clause):
+    """
+    Parses a simple WHERE clause, supporting equality checks.
+    """
+    if "=" not in where_clause:
+        raise ValueError("Only simple equality WHERE clauses are supported")
+
+    column_name, value = where_clause.split("=", 1)
+    column_name = column_name.strip()
+    value = value.strip().strip("'")  # Remove any surrounding quotes from value
+    return column_name, value
+
 def read_page_header(file, page_number):
     """
     Reads the header of a page and returns the number of cells and cell pointers.
@@ -168,27 +186,53 @@ def find_column_index(create_table_sql, column_name):
     """
     Finds the index of the specified column in the CREATE TABLE statement.
     """
-    parsed = sqlparse.parse(create_table_sql)[0]
-    columns_part = [token for token in parsed.tokens if token.ttype is None and '(' in str(token)][0]
-    column_defs = str(columns_part).split(',')
-    for index, column_def in enumerate(column_defs):
-        if column_name in column_def:
-            return index
-    raise ValueError(f"Column {column_name} not found in CREATE TABLE statement")
 
-def extract_column_values(file, root_page_number, column_index):
+    start = create_table_sql.find("(")
+    end = create_table_sql.rfind(")")
+
+    if start == -1 or end == -1 or start > end:
+        raise ValueError("Invalid CREATE TABLE statement format")
+    columns_part = create_table_sql[start + 1:end].strip()
+    column_defs = [col.strip() for col in columns_part.split(",")]
+
+    for index, column_def in enumerate(column_defs):
+        col_name = column_def.split()[0]  # The column name is the first word in the definition
+        if col_name == column_name:
+            return index
+
+    # If the column name wasn't found
+    raise ValueError(f"Column '{column_name}' not found in CREATE TABLE statement")
+
+
+def extract_column_values(file, root_page_number, column_index, where_clause=None):
     """
     Extracts the values of the specified column from the table given its root page number.
+    Applies the WHERE clause if specified.
     """
     num_cells, cell_pointers = read_page_header(file, root_page_number)
     column_values = []
+
+    where_column_index = None
+    where_value = None
+
+    if where_clause:
+        where_column_name, where_value = parse_where_clause(where_clause)
+
+        # Find the index of the column specified in the WHERE clause
+        create_table_sql = find_table_metadata(file, table_name)[1]
+        where_column_index = find_column_index(create_table_sql, where_column_name)
 
     for cell_pointer in cell_pointers:
         file.seek((root_page_number - 1) * 4096 + cell_pointer)
         parse_varint(file)  # Record size
         parse_varint(file)  # Rowid
         record = parse_record(file)
-        
+
+        if where_clause:
+            # Apply filter: only add rows that match the WHERE condition
+            if where_column_index < len(record) and record[where_column_index] != where_value:
+                continue
+
         if column_index < len(record):
             value = record[column_index]
             if isinstance(value, bytes):  # Decode if it's bytes (TEXT)
@@ -196,6 +240,7 @@ def extract_column_values(file, root_page_number, column_index):
             column_values.append(value)
 
     return column_values
+
 
 def count_rows_in_table(file, root_page_number):
     """
@@ -221,7 +266,7 @@ with open(database_file_path, "rb") as database_file:
             print(f"number of tables: {number_of_tables}")
     elif command.startswith("SELECT"):
         # Extract the column name and table name from the command
-        column_name, table_name = extract_column_and_table_name(command)
+        column_name, table_name, where_clause = extract_query_components(command)
         root_page, create_table_sql = find_table_metadata(database_file, table_name)
         column_index = find_column_index(create_table_sql, column_name)
         column_values = extract_column_values(database_file, root_page, column_index)
